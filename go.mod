@@ -1,4 +1,4 @@
-module github.com/user/davisweather
+module github.com/meteogargano/davisweather
 
 go 1.25.0
 
