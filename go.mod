@@ -3,6 +3,7 @@ module github.com/meteogargano/davisweather
 go 1.25.0
 
 require (
+	github.com/jedib0t/go-pretty/v6 v6.7.8
 	go.bug.st/serial v1.6.2
 	modernc.org/sqlite v1.48.0
 )
@@ -11,7 +12,6 @@ require (
 	github.com/creack/goselect v0.1.2 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/jedib0t/go-pretty/v6 v6.7.8 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
