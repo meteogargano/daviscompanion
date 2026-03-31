@@ -7,6 +7,7 @@ package main
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
 	"math"
 	"time"
 
@@ -102,7 +103,7 @@ func calcCRC(data []byte) uint16 {
 
 const loopPacketLen = 99
 
-// LOOP packet field byte offsets.
+// LOOP1 packet field byte offsets (spec §X.1, PacketType byte 4 == 0).
 const (
 	offBarometer       = 7
 	offInsideTemp      = 9
@@ -124,6 +125,17 @@ const (
 	offSunrise         = 94
 	offSunset          = 96
 )
+
+// LOOP2 packet field byte offsets (spec §X.2, PacketType byte 4 == 1).
+// Available on VP2 firmware ≥1.90 and Vantage Vue.
+const (
+	offL2GustSpeed10Min = 21 // uint16 LE, 1/10 mph — 10-min rolling gust
+	offL2GustDir10Min   = 23 // uint16 LE, degrees
+)
+
+// gustSentinel is sent by the console when it has not yet accumulated a full
+// 10-minute window (e.g. immediately after a power cycle).
+const gustSentinel uint16 = 0x7FFF
 
 // LOOPData holds the parsed, unit-converted fields we care about.
 type LOOPData struct {
@@ -152,17 +164,27 @@ type LOOPData struct {
 	WindU float64 // m/s  eastward
 	WindV float64 // m/s  northward
 
-	// Wind – 10-minute average (used as gust proxy for API)
+	// Wind – 10-minute average (LOOP1; used as gust fallback when LOOP2 unavailable)
 	WindSpeed10MinMs  float64 // m/s
 	WindSpeed10MinMph float64 // mph (raw)
+
+	// Wind – 10-minute rolling gust (from LOOP2).
+	// HasGust is false when LOOP2 is absent or the console returns sentinel 0x7FFF
+	// (i.e. the console has not yet accumulated a full 10-minute window).
+	GustSpeedMs  float64
+	GustSpeedMph float64
+	GustDir      uint16  // meteorological degrees; 0 = calm/no data
+	GustU        float64 // m/s eastward
+	GustV        float64 // m/s northward
+	HasGust      bool
 
 	// Rain
 	YearRainClicks uint16  // raw clicks  (0.2 mm per click)
 	YearRainMM     float64 // mm
 }
 
-// parseLoop decodes a 99-byte LOOP1 packet.
-func parseLoop(raw []byte) (*LOOPData, error) {
+// parseLoop1 decodes a 99-byte LOOP1 packet (PacketType == 0).
+func parseLoop1(raw []byte) (*LOOPData, error) {
 	if len(raw) != loopPacketLen {
 		return nil, fmt.Errorf("expected %d bytes, got %d", loopPacketLen, len(raw))
 	}
@@ -170,6 +192,11 @@ func parseLoop(raw []byte) (*LOOPData, error) {
 	// ── Header check ────────────────────────────────────────────────────────
 	if raw[0] != 'L' || raw[1] != 'O' || raw[2] != 'O' {
 		return nil, fmt.Errorf("bad LOOP header: %02X %02X %02X", raw[0], raw[1], raw[2])
+	}
+
+	// ── Packet type check ───────────────────────────────────────────────────
+	if raw[4] != 0 {
+		return nil, fmt.Errorf("expected LOOP1 (type 0), got type %d", raw[4])
 	}
 
 	// ── CRC verification ────────────────────────────────────────────────────
@@ -233,6 +260,44 @@ func parseLoop(raw []byte) (*LOOPData, error) {
 	return d, nil
 }
 
+// parseLoop2 extracts the 10-minute rolling gust fields from a LOOP2 packet
+// and merges them into d. Non-fatal: if the console has not yet accumulated
+// 10 minutes of data it sends the sentinel 0x7FFF; we set HasGust=false in
+// that case so callers can display "n/a" rather than a garbage value.
+func parseLoop2(raw []byte, d *LOOPData) error {
+	if len(raw) != loopPacketLen {
+		return fmt.Errorf("expected %d bytes, got %d", loopPacketLen, len(raw))
+	}
+	if raw[0] != 'L' || raw[1] != 'O' || raw[2] != 'O' {
+		return fmt.Errorf("bad LOOP header: %02X %02X %02X", raw[0], raw[1], raw[2])
+	}
+	if raw[4] != 1 {
+		return fmt.Errorf("expected LOOP2 (type 1), got type %d", raw[4])
+	}
+	if crc := calcCRC(raw); crc != 0 {
+		return fmt.Errorf("CRC check failed (got 0x%04X, want 0x0000)", crc)
+	}
+
+	gustRaw := binary.LittleEndian.Uint16(raw[offL2GustSpeed10Min:])
+	if gustRaw == gustSentinel {
+		d.HasGust = false
+		return nil
+	}
+
+	// Gust speed is stored in 1/10 mph units.
+	gustMph := float64(gustRaw) / 10.0
+	d.GustSpeedMph = gustMph
+	d.GustSpeedMs = mphToMs(gustMph)
+	d.GustDir = binary.LittleEndian.Uint16(raw[offL2GustDir10Min:])
+	if d.GustDir > 0 {
+		rad := float64(d.GustDir) * math.Pi / 180.0
+		d.GustU = -d.GustSpeedMs * math.Sin(rad)
+		d.GustV = -d.GustSpeedMs * math.Cos(rad)
+	}
+	d.HasGust = true
+	return nil
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Unit conversion helpers
 // ─────────────────────────────────────────────────────────────────────────────
@@ -291,11 +356,17 @@ func readFull(port serial.Port, dst []byte, timeout time.Duration) error {
 	return nil
 }
 
-// fetchLOOP sends "LOOP 1\n", waits for ACK, then reads the 99-byte packet.
-func fetchLOOP(port serial.Port) (*LOOPData, error) {
-	// Send command (single '\n' terminator – required for VP2).
-	if _, err := port.Write([]byte("LOOP 1\n")); err != nil {
-		return nil, fmt.Errorf("send LOOP command: %w", err)
+// fetchLPS sends "LPS 3 2\n" and reads one LOOP1 followed by one LOOP2 packet.
+//
+// LPS bitmask 3 = bit0 (LOOP1) | bit1 (LOOP2), count 2 = one of each.
+// The console delivers them sequentially, ~2 s apart.
+// Requires VP2 firmware ≥1.90 or Vantage Vue; returns NAK on older firmware.
+//
+// LOOP2 failure is non-fatal: if the read or parse fails, the function returns
+// the valid LOOP1 data with HasGust=false and logs a warning.
+func fetchLPS(port serial.Port) (*LOOPData, error) {
+	if _, err := port.Write([]byte("LPS 3 2\n")); err != nil {
+		return nil, fmt.Errorf("send LPS command: %w", err)
 	}
 
 	// Expect ACK (0x06).
@@ -307,16 +378,34 @@ func fetchLOOP(port serial.Port) (*LOOPData, error) {
 	case 0x06:
 		// good
 	case 0x21:
-		return nil, fmt.Errorf("console returned NAK (0x21) – bad command parameters")
+		return nil, fmt.Errorf("console returned NAK (0x21) – LPS rejected, VP2 firmware ≥1.90 required")
 	default:
-		return nil, fmt.Errorf("unexpected response to LOOP command: 0x%02X", ack[0])
+		return nil, fmt.Errorf("unexpected response to LPS command: 0x%02X", ack[0])
 	}
 
-	// Read exactly 99 bytes of packet data.
-	raw := make([]byte, loopPacketLen)
-	if err := readFull(port, raw, 5*time.Second); err != nil {
-		return nil, fmt.Errorf("reading LOOP packet: %w", err)
+	// ── Packet 1: LOOP1 ───────────────────────────────────────────────────
+	raw1 := make([]byte, loopPacketLen)
+	if err := readFull(port, raw1, 5*time.Second); err != nil {
+		return nil, fmt.Errorf("reading LOOP1: %w", err)
 	}
+	d, err := parseLoop1(raw1)
+	if err != nil {
+		return nil, err
+	}
+	log.Println("LOOP1 OK")
 
-	return parseLoop(raw)
+	// ── Packet 2: LOOP2 ───────────────────────────────────────────────────
+	// Console sleeps ~2 s between packets; allow 6 s total.
+	raw2 := make([]byte, loopPacketLen)
+	if err := readFull(port, raw2, 6*time.Second); err != nil {
+		log.Printf("warning: LOOP2 read failed: %v (gust will be unavailable)", err)
+		return d, nil
+	}
+	if err := parseLoop2(raw2, d); err != nil {
+		log.Printf("warning: LOOP2 parse failed: %v (gust will be unavailable)", err)
+		return d, nil
+	}
+	log.Println("LOOP2 OK")
+
+	return d, nil
 }

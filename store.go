@@ -35,7 +35,15 @@ func openDB(path string) (*sql.DB, error) {
 		created_at TEXT    NOT NULL
 	)`)
 	if err != nil {
-		return nil, fmt.Errorf("migrate: %w", err)
+		return nil, fmt.Errorf("migrate pending_measurements: %w", err)
+	}
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS pending_legacy (
+		id         INTEGER PRIMARY KEY AUTOINCREMENT,
+		packet     TEXT    NOT NULL,
+		created_at TEXT    NOT NULL
+	)`)
+	if err != nil {
+		return nil, fmt.Errorf("migrate pending_legacy: %w", err)
 	}
 	return db, nil
 }
@@ -125,5 +133,94 @@ func deletePending(db *sql.DB, ids []int64) error {
 func pendingCount(db *sql.DB) (int64, error) {
 	var n int64
 	err := db.QueryRow(`SELECT COUNT(*) FROM pending_measurements`).Scan(&n)
+	return n, err
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Legacy pending store
+// ─────────────────────────────────────────────────────────────────────────────
+
+// LegacyPendingRow is a row from the pending_legacy table.
+type LegacyPendingRow struct {
+	ID     int64
+	Packet string
+}
+
+// storeLegacyPending inserts pipe-delimited packets into the pending_legacy
+// table within a single transaction.
+func storeLegacyPending(db *sql.DB, packets []string) error {
+	if len(packets) == 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`INSERT INTO pending_legacy (packet, created_at) VALUES (?, ?)`)
+	if err != nil {
+		return fmt.Errorf("prepare insert: %w", err)
+	}
+	defer stmt.Close()
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, p := range packets {
+		if _, err := stmt.Exec(p, now); err != nil {
+			return fmt.Errorf("insert: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+// loadLegacyPending returns up to limit rows ordered oldest-first.
+func loadLegacyPending(db *sql.DB, limit int) ([]LegacyPendingRow, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := db.Query(
+		`SELECT id, packet FROM pending_legacy ORDER BY id ASC LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query pending_legacy: %w", err)
+	}
+	defer rows.Close()
+
+	var result []LegacyPendingRow
+	for rows.Next() {
+		var id int64
+		var packet string
+		if err := rows.Scan(&id, &packet); err != nil {
+			return nil, fmt.Errorf("scan row: %w", err)
+		}
+		result = append(result, LegacyPendingRow{ID: id, Packet: packet})
+	}
+	return result, rows.Err()
+}
+
+// deleteLegacyPending removes rows by ID from pending_legacy.
+func deleteLegacyPending(db *sql.DB, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	query := "DELETE FROM pending_legacy WHERE id IN (" + placeholders + ")"
+
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	if _, err := db.Exec(query, args...); err != nil {
+		return fmt.Errorf("delete pending_legacy: %w", err)
+	}
+	return nil
+}
+
+// legacyPendingCount returns the number of rows currently buffered in pending_legacy.
+func legacyPendingCount(db *sql.DB) (int64, error) {
+	var n int64
+	err := db.QueryRow(`SELECT COUNT(*) FROM pending_legacy`).Scan(&n)
 	return n, err
 }

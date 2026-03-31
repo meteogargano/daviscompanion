@@ -165,6 +165,15 @@ func (c *APIClient) bulkPost(batch []map[string]any) (BulkResult, error) {
 //	pressure     → barometric pressure (hPa)
 //	wind         → wind (u/v/gust in m/s)
 //	rain         → cumulative year-to-date rain (mm)
+// gustMs returns the best available gust speed in m/s: the LOOP2 10-min
+// rolling maximum when available, otherwise the LOOP1 10-min average proxy.
+func gustMs(d *LOOPData) float64 {
+	if d.HasGust {
+		return d.GustSpeedMs
+	}
+	return d.WindSpeed10MinMs
+}
+
 func buildMeasurements(d *LOOPData, t time.Time, bucketMM float64) []map[string]any {
 	ts := t.UTC().Format(time.RFC3339)
 	return []map[string]any{
@@ -184,12 +193,12 @@ func buildMeasurements(d *LOOPData, t time.Time, bucketMM float64) []map[string]
 			"timestamp": ts,
 		},
 		{
-			// Gust is approximated by the 10-minute average speed;
-			// LOOP1 does not carry a true gust field.
+			// Gust from LOOP2 10-min rolling maximum; falls back to LOOP1 10-min
+			// avg when LOOP2 is unavailable (firmware too old or console cold-start).
 			"sensor":    "wind",
 			"u":         d.WindU,
 			"v":         d.WindV,
-			"gust":      d.WindSpeed10MinMs,
+			"gust":      gustMs(d),
 			"timestamp": ts,
 		},
 		{
