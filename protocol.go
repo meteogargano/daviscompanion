@@ -306,9 +306,25 @@ func fToC(f float64) float64      { return (f - 32.0) * 5.0 / 9.0 }
 func inHgToHPa(v float64) float64 { return v * 33.8639 }
 func mphToMs(v float64) float64   { return v * 0.44704 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Serial helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// openSerialPort opens a serial port with the specified baud rate and configures
+// it for Davis console communication (8N1 with read timeout).
+func openSerialPort(portName string, baud int) (serial.Port, error) {
+	mode := &serial.Mode{
+		BaudRate: baud,
+		DataBits: 8,
+		Parity:   serial.NoParity,
+		StopBits: serial.OneStopBit,
+	}
+	port, err := serial.Open(portName, mode)
+	if err != nil {
+		return nil, err
+	}
+	if err := port.SetReadTimeout(200 * time.Millisecond); err != nil {
+		port.Close()
+		return nil, err
+	}
+	return port, nil
+}
 
 // wakeConsole performs the Davis console wake-up procedure (spec §V).
 // It sends '\n' and waits up to 1.2 s for '\n\r'. Retries up to 3 times.

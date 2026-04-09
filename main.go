@@ -23,24 +23,23 @@ import (
 	"time"
 
 	"github.com/jedib0t/go-pretty/v6/table"
-	"go.bug.st/serial"
 )
 
 func main() {
 	// ── Flags ────────────────────────────────────────────────────────────────
-	portName    := flag.String("port",     "",             "Serial port, e.g. /dev/ttyUSB0 or COM3 (required)")
-	baud        := flag.Int("baud",        19200,          "Baud rate (Davis default: 19200)")
-	apiURL      := flag.String("api-url",  "",             "Voria2 API base URL, e.g. https://api.voria2.io (required in daemon mode)")
-	apiKey      := flag.String("api-key",  "",             "Voria2 API key starting with vsk_ (required in daemon mode)")
-	intervalStr := flag.String("interval", "2m",           "Poll interval, e.g. 30s, 2m, 5m")
-	dbPath      := flag.String("db",       "./weather.db", "SQLite buffer database path")
-	bucket      := flag.String("bucket",   "0.2mm",  "Rain bucket size per click: 0.2mm or 0.01in")
-	dryRun      := flag.Bool("dry-run",   false,    "Read one packet, print values and exit (no upload, no DB)")
+	portName := flag.String("port", "", "Serial port, e.g. /dev/ttyUSB0 or COM3 (required)")
+	baud := flag.Int("baud", 19200, "Baud rate (Davis default: 19200)")
+	apiURL := flag.String("api-url", "", "Voria2 API base URL, e.g. https://api.voria2.io (required in daemon mode)")
+	apiKey := flag.String("api-key", "", "Voria2 API key starting with vsk_ (required in daemon mode)")
+	intervalStr := flag.String("interval", "2m", "Poll interval, e.g. 30s, 2m, 5m")
+	dbPath := flag.String("db", "./weather.db", "SQLite buffer database path")
+	bucket := flag.String("bucket", "0.2mm", "Rain bucket size per click: 0.2mm or 0.01in")
+	dryRun := flag.Bool("dry-run", false, "Read one packet, print values and exit (no upload, no DB)")
 
-	withLegacyAPI    := flag.Bool("with-legacy-api",  false, "Send to both Voria2 and the legacy API (mutually exclusive with --only-legacy-api)")
-	onlyLegacyAPI    := flag.Bool("only-legacy-api",  false, "Send only to the legacy API, skipping Voria2 (mutually exclusive with --with-legacy-api)")
-	legacyAPIURL     := flag.String("legacy-api-url",     "", "Legacy API base URL (required with --with-legacy-api / --only-legacy-api)")
-	legacyAPIKey     := flag.String("legacy-api-key",     "", "Legacy API authorization key (required with --with-legacy-api / --only-legacy-api)")
+	withLegacyAPI := flag.Bool("with-legacy-api", false, "Send to both Voria2 and the legacy API (mutually exclusive with --only-legacy-api)")
+	onlyLegacyAPI := flag.Bool("only-legacy-api", false, "Send only to the legacy API, skipping Voria2 (mutually exclusive with --with-legacy-api)")
+	legacyAPIURL := flag.String("legacy-api-url", "", "Legacy API base URL (required with --with-legacy-api / --only-legacy-api)")
+	legacyAPIKey := flag.String("legacy-api-key", "", "Legacy API authorization key (required with --with-legacy-api / --only-legacy-api)")
 	legacyAPIStation := flag.String("legacy-api-station", "", "Legacy station identifier appended to the URL path (required with --with-legacy-api / --only-legacy-api)")
 	flag.Parse()
 
@@ -57,32 +56,18 @@ func main() {
 		log.Fatalf("invalid --bucket %q: accepted values are 0.2mm or 0.01in", *bucket)
 	}
 
-	// ── Serial port ──────────────────────────────────────────────────────────
-	mode := &serial.Mode{
-		BaudRate: *baud,
-		DataBits: 8,
-		Parity:   serial.NoParity,
-		StopBits: serial.OneStopBit,
-	}
-	port, err := serial.Open(*portName, mode)
-	if err != nil {
-		log.Fatalf("open %s: %v", *portName, err)
-	}
-	defer port.Close()
-
-	if err := port.SetReadTimeout(200 * time.Millisecond); err != nil {
-		log.Printf("warning: could not set read timeout: %v", err)
-	}
-	log.Printf("Opened %s at %d 8N1", *portName, *baud)
-
-	// ── Wake console ─────────────────────────────────────────────────────────
-	if err := wakeConsole(port); err != nil {
-		log.Fatalf("wake console: %v", err)
-	}
-	log.Println("Console awake")
-
 	// ── Dry-run: fetch one packet, print and exit ─────────────────────────────
 	if *dryRun {
+		port, err := openSerialPort(*portName, *baud)
+		if err != nil {
+			log.Fatalf("open serial port %s: %v", *portName, err)
+		}
+		defer port.Close()
+
+		if err := wakeConsole(port); err != nil {
+			log.Fatalf("wake console: %v", err)
+		}
+
 		data, err := fetchLPS(port)
 		if err != nil {
 			log.Fatalf("fetch LPS: %v", err)
@@ -154,7 +139,7 @@ func main() {
 	// ── Run loop ─────────────────────────────────────────────────────────────
 	log.Printf("Polling every %s. Press Ctrl+C to stop.", interval)
 
-	runTick(port, db, client, legacyClient, bucketMM)
+	runTick(*portName, *baud, db, client, legacyClient, bucketMM)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -162,7 +147,7 @@ func main() {
 	for {
 		select {
 		case <-ticker.C:
-			runTick(port, db, client, legacyClient, bucketMM)
+			runTick(*portName, *baud, db, client, legacyClient, bucketMM)
 		case <-ctx.Done():
 			log.Println("Received shutdown signal, exiting.")
 			return
@@ -172,14 +157,25 @@ func main() {
 
 // runTick is called on every poll interval. It reads one LOOP packet then
 // dispatches to the Voria2 and/or legacy delivery paths independently.
-func runTick(port serial.Port, db *sql.DB, client *APIClient, legacyClient *LegacyClient, bucketMM float64) {
+func runTick(portName string, baud int, db *sql.DB, client *APIClient, legacyClient *LegacyClient, bucketMM float64) {
+	// ── Open serial port ─────────────────────────────────────────────────────
+	port, err := openSerialPort(portName, baud)
+	if err != nil {
+		log.Printf("open serial port %s: %v (will retry on next tick)", portName, err)
+		return
+	}
+	defer port.Close()
+
+	// ── Wake console ─────────────────────────────────────────────────────────
+	if err := wakeConsole(port); err != nil {
+		log.Printf("wake console: %v (will retry on next tick)", err)
+		return
+	}
+
 	// ── Fetch reading ────────────────────────────────────────────────────────
 	data, err := fetchLPS(port)
 	if err != nil {
-		log.Printf("fetchLPS error: %v; attempting console re-wake", err)
-		if wakeErr := wakeConsole(port); wakeErr != nil {
-			log.Printf("re-wake failed: %v", wakeErr)
-		}
+		log.Printf("fetchLPS error: %v (will retry on next tick)", err)
 		return
 	}
 
