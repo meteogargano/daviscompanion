@@ -14,6 +14,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -70,6 +71,9 @@ func main() {
 
 		data, err := fetchLPS(port)
 		if err != nil {
+			if errors.Is(err, errISSLinkLost) {
+				log.Fatalf("discarded LOOP packet: %v", err)
+			}
 			log.Fatalf("fetch LPS: %v", err)
 		}
 		printResults(data, bucketMM)
@@ -175,6 +179,10 @@ func runTick(portName string, baud int, db *sql.DB, client *APIClient, legacyCli
 	// ── Fetch reading ────────────────────────────────────────────────────────
 	data, err := fetchLPS(port)
 	if err != nil {
+		if errors.Is(err, errISSLinkLost) {
+			log.Printf("discarding LOOP packet while ISS link is down: %v (waiting for next good packet)", err)
+			return
+		}
 		log.Printf("fetchLPS error: %v (will retry on next tick)", err)
 		return
 	}

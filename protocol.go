@@ -6,6 +6,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -24,6 +25,8 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 var crcTable [256]uint16
+
+var errISSLinkLost = errors.New("outside temperature > 1000 F: base station lost connection to ISS")
 
 func init() {
 	const poly = 0x1021
@@ -129,8 +132,10 @@ const (
 // LOOP2 packet field byte offsets (spec §X.2, PacketType byte 4 == 1).
 // Available on VP2 firmware ≥1.90 and Vantage Vue.
 const (
-	offL2GustSpeed10Min = 21 // uint16 LE, 1/10 mph — 10-min rolling gust
-	offL2GustDir10Min   = 23 // uint16 LE, degrees
+	// Davis' PDF says 0.1 mph resolution here, but real consoles and other
+	// implementations report this field as whole mph.
+	offL2GustSpeed10Min = 22 // uint16 LE, mph — 10-min rolling gust
+	offL2GustDir10Min   = 24 // uint16 LE, degrees
 )
 
 // gustSentinel is sent by the console when it has not yet accumulated a full
@@ -224,6 +229,9 @@ func parseLoop1(raw []byte) (*LOOPData, error) {
 	// ── Outside temperature ──────────────────────────────────────────────────
 	// int16 LE, units: tenths of °F
 	d.OutsideTempF = float64(int16(binary.LittleEndian.Uint16(raw[offOutsideTemp:]))) / 10.0
+	if d.OutsideTempF > 1000 {
+		return nil, fmt.Errorf("%w (decoded %.1f F)", errISSLinkLost, d.OutsideTempF)
+	}
 	d.OutsideTempC = fToC(d.OutsideTempF)
 
 	// ── Wind (instantaneous) ─────────────────────────────────────────────────
@@ -284,12 +292,13 @@ func parseLoop2(raw []byte, d *LOOPData) error {
 		return nil
 	}
 
-	// Gust speed is stored in 1/10 mph units.
-	gustMph := float64(gustRaw) / 10.0
+	// Despite the Davis PDF claiming 0.1 mph resolution, this field is emitted
+	// as whole mph on real hardware.
+	gustMph := float64(gustRaw)
 	d.GustSpeedMph = gustMph
 	d.GustSpeedMs = mphToMs(gustMph)
 	d.GustDir = binary.LittleEndian.Uint16(raw[offL2GustDir10Min:])
-	if d.GustDir > 0 {
+	if d.GustDir >= 1 && d.GustDir <= 360 {
 		rad := float64(d.GustDir) * math.Pi / 180.0
 		d.GustU = -d.GustSpeedMs * math.Sin(rad)
 		d.GustV = -d.GustSpeedMs * math.Cos(rad)
