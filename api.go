@@ -165,6 +165,7 @@ func (c *APIClient) bulkPost(batch []map[string]any) (BulkResult, error) {
 //	pressure     → barometric pressure (hPa)
 //	wind         → wind (u/v/gust in m/s)
 //	rain         → cumulative year-to-date rain (mm)
+//
 // gustMs returns the best available gust speed in m/s: the LOOP2 10-min
 // rolling maximum when available, otherwise the LOOP1 10-min average proxy.
 func gustMs(d *LOOPData) float64 {
@@ -176,20 +177,10 @@ func gustMs(d *LOOPData) float64 {
 
 func buildMeasurements(d *LOOPData, t time.Time, bucketMM float64) []map[string]any {
 	ts := t.UTC().Format(time.RFC3339)
-	return []map[string]any{
+	measurements := []map[string]any{
 		{
 			"sensor":    "temperature",
 			"value":     d.OutsideTempC,
-			"timestamp": ts,
-		},
-		{
-			"sensor":    "humidity",
-			"value":     float64(d.OutsideHumidity),
-			"timestamp": ts,
-		},
-		{
-			"sensor":    "pressure",
-			"value":     d.PressureHPa,
 			"timestamp": ts,
 		},
 		{
@@ -210,4 +201,30 @@ func buildMeasurements(d *LOOPData, t time.Time, bucketMM float64) []map[string]
 			"timestamp":     ts,
 		},
 	}
+
+	if !outsideHumidityMissing(d.OutsideHumidity) {
+		measurements = append(measurements, map[string]any{
+			"sensor":    "humidity",
+			"value":     float64(d.OutsideHumidity),
+			"timestamp": ts,
+		})
+	}
+
+	if !pressureMissing(d.PressureInHg) {
+		measurements = append(measurements, map[string]any{
+			"sensor":    "pressure",
+			"value":     d.PressureHPa,
+			"timestamp": ts,
+		})
+	}
+
+	return measurements
+}
+
+func outsideHumidityMissing(value uint8) bool {
+	return value == 0xFF
+}
+
+func pressureMissing(valueInHg float64) bool {
+	return valueInHg <= 0
 }

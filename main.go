@@ -205,10 +205,31 @@ func runVoria2Tick(data *LOOPData, now time.Time, db *sql.DB, client *APIClient,
 	// Fill the 1000-item batch limit with oldest pending rows first; the
 	// current readings occupy the tail of the batch.
 	const batchMax = 1000
-	pending, err := loadPending(db, batchMax-len(current))
+	pendingCountBefore, err := pendingCount(db)
+	if err != nil {
+		log.Printf("pendingCount error: %v (assuming empty buffer)", err)
+		pendingCountBefore = 0
+	}
+
+	pendingLimit := batchMax
+	if pendingCountBefore == 0 {
+		pendingLimit = batchMax - len(current)
+	}
+
+	pending, err := loadPending(db, pendingLimit)
 	if err != nil {
 		log.Printf("loadPending error: %v (proceeding without buffered rows)", err)
 		pending = nil
+	}
+
+	backlogMode := len(pending) > 0
+	var bufferedCurrentRows []PendingRow
+	if backlogMode {
+		bufferedCurrentRows, err = storePendingRows(db, current)
+		if err != nil {
+			log.Printf("storePending error while preserving current readings behind backlog: %v", err)
+			return
+		}
 	}
 
 	// ── Build combined batch ─────────────────────────────────────────────────
@@ -216,63 +237,110 @@ func runVoria2Tick(data *LOOPData, now time.Time, db *sql.DB, client *APIClient,
 	for _, row := range pending {
 		batch = append(batch, row.Payload)
 	}
-	batch = append(batch, current...)
+	if !backlogMode {
+		batch = append(batch, current...)
+	}
+
+	if len(batch) == 0 {
+		remaining, _ := pendingCount(db)
+		log.Printf("Voria2 tick idle: no measurements to send, buffer remaining: %d", remaining)
+		return
+	}
 
 	// ── Upload ───────────────────────────────────────────────────────────────
 	result, err := client.bulkPost(batch)
 	if err != nil {
 		if isPermanent(err) {
 			// 4xx: bad API key or unknown sensor slug – won't self-heal.
-			// Do NOT buffer; logging is the only useful action.
+			// Remove freshly buffered current rows if we pre-buffered them behind backlog.
+			if len(bufferedCurrentRows) > 0 {
+				bufferedIDs := make([]int64, 0, len(bufferedCurrentRows))
+				deadRows := make([]DeadMeasurementInsert, 0, len(bufferedCurrentRows))
+				for _, row := range bufferedCurrentRows {
+					bufferedIDs = append(bufferedIDs, row.ID)
+					deadRows = append(deadRows, DeadMeasurementInsert{Payload: row.Payload, Error: err.Error()})
+				}
+				if delErr := deletePending(db, bufferedIDs); delErr != nil {
+					log.Printf("deletePending buffered current rows error: %v", delErr)
+				}
+				if deadErr := storeDeadMeasurements(db, deadRows); deadErr != nil {
+					log.Printf("storeDeadMeasurements buffered current rows error: %v", deadErr)
+				}
+			}
 			log.Printf("Voria2 permanent error (check --api-key and sensor slugs): %v", err)
 		} else {
 			// Transient: network down or server 5xx – buffer current readings.
 			log.Printf("Voria2 upload failed (transient, will retry next tick): %v", err)
-			if storeErr := storePending(db, current); storeErr != nil {
-				log.Printf("storePending error: %v", storeErr)
+			if !backlogMode {
+				if storeErr := storePending(db, current); storeErr != nil {
+					log.Printf("storePending error: %v", storeErr)
+				} else {
+					n, _ := pendingCount(db)
+					log.Printf("Voria2: buffered %d new rows; total pending: %d", len(current), n)
+				}
 			} else {
 				n, _ := pendingCount(db)
-				log.Printf("Voria2: buffered %d new rows; total pending: %d", len(current), n)
+				log.Printf("Voria2: backlog preserved, total pending: %d", n)
 			}
 		}
 		return
 	}
 
 	// ── Process per-item results ──────────────────────────────────────────────
-	// HTTP 200 means the server processed the batch. Individual items may still
-	// have failed permanently (e.g. unknown sensor slug). We delete ALL sent
-	// pending rows regardless of per-item outcome – permanent failures will
-	// never self-heal and must not accumulate in the buffer indefinitely.
 	okCount := 0
+	var pendingAckIDs []int64
+	var pendingRejected []RejectedPendingRow
+	var currentRejected []DeadMeasurementInsert
 	for _, r := range result.Results {
 		if r.OK {
 			okCount++
-		} else {
 			if r.Index < len(pending) {
-				log.Printf("Voria2: buffered row id=%d rejected permanently: %s (removed from buffer)",
-					pending[r.Index].ID, r.Error)
-			} else {
-				ci := r.Index - len(pending)
-				log.Printf("Voria2: current measurement index %d rejected permanently: %s",
-					ci, r.Error)
+				pendingAckIDs = append(pendingAckIDs, pending[r.Index].ID)
 			}
+			continue
+		}
+
+		if r.Index < len(pending) {
+			log.Printf("Voria2: buffered row id=%d rejected permanently: %s (moving to dead-letter)",
+				pending[r.Index].ID, r.Error)
+			pendingRejected = append(pendingRejected, RejectedPendingRow{Row: pending[r.Index], Error: r.Error})
+			continue
+		}
+
+		if backlogMode {
+			continue
+		}
+
+		ci := r.Index - len(pending)
+		if ci >= 0 && ci < len(current) {
+			log.Printf("Voria2: current measurement index %d rejected permanently: %s (moving to dead-letter)",
+				ci, r.Error)
+			currentRejected = append(currentRejected, DeadMeasurementInsert{Payload: current[ci], Error: r.Error})
 		}
 	}
 
-	// Delete the pending rows we included in this batch.
-	if len(pending) > 0 {
-		pendingIDs := make([]int64, len(pending))
-		for i, row := range pending {
-			pendingIDs[i] = row.ID
-		}
-		if delErr := deletePending(db, pendingIDs); delErr != nil {
+	if len(pendingAckIDs) > 0 {
+		if delErr := deletePending(db, pendingAckIDs); delErr != nil {
 			log.Printf("deletePending error: %v", delErr)
+		}
+	}
+
+	if len(pendingRejected) > 0 {
+		if moveErr := movePendingToDead(db, pendingRejected); moveErr != nil {
+			log.Printf("movePendingToDead error: %v", moveErr)
+		}
+	}
+
+	if len(currentRejected) > 0 {
+		if deadErr := storeDeadMeasurements(db, currentRejected); deadErr != nil {
+			log.Printf("storeDeadMeasurements error: %v", deadErr)
 		}
 	}
 
 	remaining, _ := pendingCount(db)
 	log.Printf("Voria2 tick OK: sent %d items (%d pending drained), API accepted %d/%d, buffer remaining: %d",
-		len(batch), len(pending), okCount, len(batch), remaining)
+		len(batch), len(pendingAckIDs), okCount, len(batch), remaining)
+	return
 }
 
 // legacyDrainMax is the maximum number of buffered legacy packets to drain per
