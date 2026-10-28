@@ -12,8 +12,9 @@ PKG_RELEASE:=1
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/meteogargano/daviscompanion/tar.gz/v$(PKG_VERSION)?
-# PKG_HASH is filled in after the release tag exists (see README "Releasing").
-# Without it the build only emits a "no hash" warning.
+# No PKG_HASH: the feed Makefile lives inside the same repository it
+# downloads, so a source hash would be self-referential. The buildroot only
+# emits a "no hash" warning; the URL is fixed and served over HTTPS.
 PKG_BUILD_DIR:=$(BUILD_DIR)/daviscompanion-$(PKG_VERSION)
 
 PKG_MAINTAINER:=meteogargano <meteogargano@users.noreply.github.com>

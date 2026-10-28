@@ -1,9 +1,14 @@
 # daviscompanion
 
-A Go daemon that reads current conditions from a **Davis Vantage Pro / Pro2 / Vue**
-console via the WeatherLink serial interface and continuously uploads measurements
-to the **Voria2 Ingest API**, with automatic local buffering when offline
-(can be disabled with `--no-db` for a fully stateless setup).
+A Go daemon (`davisweather`) that reads current conditions from a
+**Davis Vantage Pro / Pro2 / Vue** console via the WeatherLink serial interface
+and continuously uploads measurements to the **Voria2 Ingest API**, with
+automatic local buffering when offline (can be disabled with `--no-db` for a
+fully stateless setup).
+
+Runs on Linux, macOS and Windows directly, and is packaged for
+**OpenWrt 25.12+** with a LuCI configuration page (see
+[OpenWrt](#openwrt)).
 
 Implements the Davis Serial Communication Reference Manual, Rev 2.6.1.
 
@@ -35,7 +40,7 @@ back to the LOOP1 10-minute average speed — no data is lost.
 - A Davis WeatherLink data logger connected to a serial / USB-serial port
 - **VP2 firmware ≥1.90** or a **Vantage Vue** — required for LOOP2 / LPS command
   (older firmware still works but gust will fall back to the 10-min average)
-- A Voria2 station API key (`vsk_…`) — not required for `--dry-run` or `--only-legacy-api`
+- A Voria2 station API key (`vsk_…`) — not required for `--dry-run`
 
 ## Usage
 
@@ -73,31 +78,6 @@ buffers undeliverable readings locally in SQLite for automatic retry.
   --baud     9600
 ```
 
-### Daemon mode with legacy API
-
-Use `--with-legacy-api` to send to both Voria2 and the legacy API simultaneously,
-or `--only-legacy-api` to skip Voria2 entirely.
-
-```bash
-# Both Voria2 and legacy API
-./davisweather \
-  --port               /dev/ttyUSB0 \
-  --api-url            https://api.voria2.io \
-  --api-key            vsk_xxxxxxxxxxxxxxxxxxxx \
-  --with-legacy-api \
-  --legacy-api-url     https://legacy.example.com/ingest \
-  --legacy-api-key     mylegacykey \
-  --legacy-api-station MYSTATION
-
-# Legacy API only (no Voria2 key required)
-./davisweather \
-  --port               /dev/ttyUSB0 \
-  --only-legacy-api \
-  --legacy-api-url     https://legacy.example.com/ingest \
-  --legacy-api-key     mylegacykey \
-  --legacy-api-station MYSTATION
-```
-
 Stop cleanly with **Ctrl+C** or `SIGTERM`.
 
 ### Stateless mode (no database)
@@ -105,8 +85,7 @@ Stop cleanly with **Ctrl+C** or `SIGTERM`.
 Add `--no-db` to any daemon-mode invocation to disable the SQLite buffer
 entirely — no database file is opened or created. Each tick uploads the fresh
 readings; if the API is unreachable the readings are **dropped** and the next
-tick tries again with new data. Applies to both the Voria2 and legacy API
-paths, and can be combined with `--with-legacy-api` / `--only-legacy-api`.
+tick tries again with new data. This is the default mode on OpenWrt.
 
 ```bash
 ./davisweather \
@@ -127,89 +106,15 @@ paths, and can be combined with `--with-legacy-api` / `--only-legacy-api`.
 | Flag | Default | Description |
 |---|---|---|
 | `--port` | *(required)* | Serial port, e.g. `/dev/ttyUSB0` or `COM3` |
-| `--api-url` | *(required unless `--only-legacy-api`)* | Voria2 API base URL, e.g. `https://api.voria2.io` |
-| `--api-key` | *(required unless `--only-legacy-api`)* | Voria2 station API key (`vsk_…`) |
+| `--api-url` | *(required)* | Voria2 API base URL, e.g. `https://api.voria2.io` |
+| `--api-key` | *(required)* | Voria2 station API key (`vsk_…`) |
+| `--version` | — | Print version and exit (version is injected at build time) |
 | `--dry-run` | `false` | Read one packet, print values and exit (no upload, no DB) |
 | `--bucket` | `0.2mm` | Rain bucket size per click: `0.2mm` (metric) or `0.01in` (imperial/US) |
 | `--interval` | `2m` | Poll interval as a Go duration: `30s`, `2m`, `5m`, … |
 | `--db` | `./weather.db` | SQLite offline buffer path (ignored with `--no-db`) |
 | `--no-db` | `false` | Stateless mode: disable SQLite entirely; failed uploads are dropped and retried with fresh data on the next tick |
 | `--baud` | `19200` | Baud rate (Davis default is 19200) |
-| `--with-legacy-api` | `false` | Send to both Voria2 **and** the legacy API |
-| `--only-legacy-api` | `false` | Send **only** to the legacy API; skip Voria2 entirely |
-| `--legacy-api-url` | *(required if legacy enabled)* | Legacy API base URL |
-| `--legacy-api-key` | *(required if legacy enabled)* | Legacy API authorization key |
-| `--legacy-api-station` | *(required if legacy enabled)* | Station identifier appended as a URL path segment |
-
-`--with-legacy-api` and `--only-legacy-api` are mutually exclusive.
-
-## Legacy API mode
-
-When `--with-legacy-api` or `--only-legacy-api` is set, each poll tick also
-sends a pipe-delimited measurement packet to the configured legacy endpoint.
-
-### Packet format
-
-```
-unix_timestamp|temp_c|humidity_pct|baro_hpa|windspeed_kmh|windgust_kmh|winddir_deg|rain_mm_ytd|EE
-```
-
-Example: `1774954968|10.8|80.0|1004.9|3.5|4.0|41|245.4|EE`
-
-| Position | Field | Unit | Source | Format |
-|---|---|---|---|---|
-| 1 | Unix timestamp (UTC) | seconds | `time.Now().UTC().Unix()` | integer |
-| 2 | Outside temperature | °C | `OutsideTempC` | `%.1f` |
-| 3 | Outside humidity | % | `OutsideHumidity` | `%.1f` |
-| 4 | Barometric pressure | hPa | `PressureHPa` | `%.1f` |
-| 5 | Wind speed (instantaneous) | km/h | `WindSpeedMs × 3.6` | `%.1f` |
-| 6 | Wind gust (10-min rolling max) | km/h | `gustMs(d) × 3.6` | `%.1f` |
-| 7 | Wind direction | degrees | `WindDir` | integer |
-| 8 | Year-to-date rainfall | mm | `YearRainClicks × bucketMM` | `%.1f` |
-| 9 | End marker | — | literal | `EE` |
-
-### Transport
-
-Each packet is sent as a single `POST` request:
-
-```
-POST {legacy-api-url}/{legacy-api-station}
-Authorization: <legacy-api-key>
-Content-Type: text/plain
-
-1774954968|10.8|80.0|1004.9|3.5|4.0|41|245.4|EE
-```
-
-### Mode selection
-
-| Flag combination | Voria2 | Legacy |
-|---|---|---|
-| *(neither)* | enabled | disabled |
-| `--with-legacy-api` | enabled | enabled |
-| `--only-legacy-api` | disabled | enabled |
-
-### Offline buffering (legacy)
-
-*Also disabled by `--no-db`.*
-
-Because the legacy API accepts one packet per request, the daemon drains up to
-**50 buffered packets per tick** during recovery (vs 995 for Voria2). Both
-buffers are independent — a Voria2 failure does not prevent legacy delivery, and
-vice versa.
-
-**Error classification** follows the same rules as Voria2:
-
-| Condition | Buffered? |
-|---|---|
-| Network error / HTTP 5xx | Yes — retry next tick |
-| HTTP 4xx | No — permanent config error |
-
-**Inspect the legacy buffer:**
-
-```bash
-sqlite3 weather.db "SELECT count(*) FROM pending_legacy;"
-sqlite3 weather.db "SELECT id, created_at, packet FROM pending_legacy LIMIT 10;"
-```
 
 ## Rain bucket sizes
 
@@ -243,10 +148,10 @@ All timestamps are sent in **UTC** (`2006-01-02T15:04:05Z`).
 *This section applies to default (buffered) mode. With `--no-db` there is no
 buffer — failed uploads are dropped (see [Stateless mode](#stateless-mode-no-database)).*
 
-When the API cannot be reached, each tick's readings (5 rows) are stored in the
-local SQLite database. On the next successful tick the daemon automatically drains
-up to **995 buffered rows** alongside the current reading in a single bulk request
-(API limit: 1000 items per call).
+When the API cannot be reached, each tick's readings (up to 5 rows) are stored in
+the local SQLite database. On the next successful tick the daemon automatically
+drains up to **995 buffered rows** alongside the current reading in a single bulk
+request (API limit: 1000 items per call).
 
 **Error classification:**
 
@@ -255,7 +160,7 @@ up to **995 buffered rows** alongside the current reading in a single bulk reque
 | Network error / HTTP 5xx | Yes — retry next tick | Transient |
 | HTTP 401 / 403 | No | Bad API key won't self-heal |
 | HTTP 422 | No | Unknown sensor slug is a config error |
-| HTTP 200, item `ok: false` | Removed from buffer | Permanent rejection |
+| HTTP 200, item `ok: false` | Moved to dead-letter table | Permanent rejection |
 
 The daemon **never needs to be restarted** to recover — the ticker runs regardless
 of API health. The SQLite file persists across restarts; no buffered data is lost.
@@ -267,107 +172,111 @@ sqlite3 weather.db "SELECT count(*) FROM pending_measurements;"
 sqlite3 weather.db "SELECT id, created_at, json_extract(payload,'$.sensor') FROM pending_measurements LIMIT 10;"
 ```
 
-## legacyserver
+## OpenWrt
 
-`legacyserver` is a companion HTTP server that receives packets from
-`davisweather --with-legacy-api` / `--only-legacy-api` and writes each one to
-a `.txt` file on disk. It lives in the `legacyserver/` subdirectory and is a
-separate Go module with no external dependencies.
+`davisweather` is packaged for **OpenWrt 25.12 and newer** (the apk-based
+release; 24.10 with opkg is *not* supported because its Go toolchain is older
+than this project requires). The packaging lives in [`openwrt/`](openwrt/):
 
-### Build
+- `davisweather` — the daemon, a UCI config (`/etc/config/davisweather`) and a
+  procd init script with automatic restart on config changes
+- `luci-app-davisweather` — a LuCI configuration page under **Services → Davis
+  Weather** (client-side JS, no Lua)
+
+### Install from GitHub Releases
+
+Prebuilt `.apk` packages for `x86_64`, `aarch64_generic`,
+`arm_cortex-a7_neon-vfpv4`, `mips_24kc` and `mipsel_24kc` are attached to each
+[release](https://github.com/meteogargano/daviscompanion/releases). Download the
+`.apk` for your architecture plus the LuCI app (arch-independent), copy them to
+the router and install:
+
+```sh
+scp davisweather-0.6-r1-<arch>.apk luci-app-davisweather-0.6-r1-all.apk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1
+apk add --allow-untrusted /tmp/davisweather-*.apk /tmp/luci-app-davisweather-*.apk
+```
+
+> The packages are unsigned (personal build), hence `--allow-untrusted`.
+
+Requirements on the router:
+
+- **Free flash space:** the Go binary is ~15 MB — budget ≥ 20 MB free
+  (`df -h /overlay`). Not installable on 8/16 MB NOR devices without extroot.
+- **USB serial driver** for your USB-serial adapter (the package suggests them,
+  but does not force-install): `kmod-usb-serial-ftdi`, `kmod-usb-serial-pl2303`,
+  `kmod-usb-serial-ch341` or `kmod-usb-serial-cp210x`
+- Working NTP time sync (timestamps come from the system clock)
+
+### Configure
+
+Either via **LuCI → Services → Davis Weather**, or via UCI:
+
+```sh
+uci set davisweather.general.enabled='1'
+uci set davisweather.general.port='/dev/ttyUSB0'
+uci set davisweather.general.interval='5m'
+uci set davisweather.general.bucket='0.01in'
+uci set davisweather.voria2.api_url='https://api.voria2.io'
+uci set davisweather.voria2.api_key='vsk_xxxxxxxxxxxxxxxxxxxx'
+uci commit davisweather
+service davisweather start
+```
+
+UCI options (all map 1:1 to daemon flags):
+
+| Section | Option | Default | Description |
+|---|---|---|---|
+| `general` | `enabled` | `0` | Autostart the daemon |
+| `general` | `port` | `/dev/ttyUSB0` | Serial device |
+| `general` | `baud` | `19200` | Baud rate |
+| `general` | `interval` | `2m` | Poll interval (Go duration) |
+| `general` | `bucket` | `0.2mm` | `0.2mm` or `0.01in` |
+| `general` | `buffering` | `none` | `none` (stateless, `--no-db`) or `sqlite` (`--db`) |
+| `general` | `db_path` | `/etc/davisweather/weather.db` | SQLite path (with `buffering='sqlite'`) |
+| `voria2` | `api_url` | `https://api.voria2.io` | API base URL |
+| `voria2` | `api_key` | *(empty)* | `vsk_…` key — required to start |
+
+Changing any option (LuCI **Save & Apply** or `uci commit`) automatically
+restarts the service via its procd reload trigger.
+
+**Logs:** `logread -e davisweather` (the daemon logs to syslog via procd).
+
+Uninstall: `apk del luci-app-davisweather davisweather` — `/etc/config/davisweather`
+is preserved as a conffile.
+
+### Building the packages yourself
+
+Use the [OpenWrt SDK](https://downloads.openwrt.org/releases/25.12.0/) for your
+target and add this repository's `openwrt/` directory as a feed:
+
+```sh
+git clone https://github.com/meteogargano/daviscompanion.git
+cd /path/to/sdk
+
+echo "src-link davis /path/to/daviscompanion/openwrt" >> feeds.conf
+./scripts/feeds update davis
+./scripts/feeds install -a -p davis
+
+make menuconfig   # Utilities -> davisweather, LuCI -> Applications -> luci-app-davisweather
+make package/davisweather/compile V=s
+make package/luci-app-davisweather/compile V=s
+```
+
+Binaries land in `bin/packages/<arch>/davis/`.
+
+## Building from source
 
 ```bash
-cd legacyserver
-go build -o legacyserver .
+go build -o davisweather .
+./davisweather --version   # "dev" unless built with -ldflags "-X main.version=…"
 ```
 
-### Run
+Cross-compile for Raspberry Pi (armv7 / arm64):
 
 ```bash
-./legacyserver \
-  --api-key  mysecretkey \
-  --data-dir /var/lib/weather/packets
-
-# All options
-./legacyserver \
-  --api-key  mysecretkey \
-  --data-dir /var/lib/weather/packets \
-  --addr     :9000 \
-  --workers  8 \
-  --queue    2048
+./compile-pi.sh   # writes dist/davisweather-armv7l and dist/davisweather-aarch64
 ```
-
-### Flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--api-key` | *(required)* | Key expected in the `Authorization` header |
-| `--data-dir` | *(required)* | Directory where `.txt` files are written (created if absent) |
-| `--addr` | `:8080` | Listen address |
-| `--workers` | `4` | Background file-writer goroutines |
-| `--queue` | `1024` | In-memory write queue capacity |
-
-### Endpoint
-
-```
-POST /{station}
-Authorization: <api-key>
-Content-Type: text/plain
-
-1774954968|10.8|80.0|1004.9|3.5|4.0|41|245.4|EE
-```
-
-The station name is taken from the **last path segment** of the URL, so both
-`/MYSTATION` and `/api/v1/MYSTATION` work — configure the client's
-`--legacy-api-url` accordingly.
-
-Multiple packets can be sent in one request body (one per line). Each valid
-line is written as a separate file; invalid lines are rejected individually and
-reported in the response without affecting the rest of the batch.
-
-### Output files
-
-Each accepted packet is saved as:
-
-```
-{data-dir}/meteo_{station}_{unix_timestamp}.txt
-```
-
-The unix timestamp is taken from **field 1 of the packet** (the weather
-station's own recording time). File content is the raw packet string followed
-by a newline.
-
-Example:
-
-```
-meteo_MYSTATION_1774954968.txt  → "1774954968|10.8|80.0|1004.9|3.5|4.0|41|245.4|EE\n"
-```
-
-If a packet with the same station and timestamp is received again (e.g. a
-client retry), the file is overwritten with identical content.
-
-### Response
-
-```json
-{"ok": true,  "accepted": 1, "rejected": 0, "errors": []}
-{"ok": true,  "accepted": 2, "rejected": 1, "errors": [{"line": 3, "message": "expected 9 pipe-delimited fields, got 5"}]}
-{"ok": false, "accepted": 0, "rejected": 1, "errors": [{"line": 1, "message": "expected EE terminator, got \"XX\""}]}
-```
-
-HTTP status: `200` when at least one packet was accepted; `422` when all
-packets were rejected; `401` for bad key; `405` for non-POST methods.
-
-### Architecture
-
-File writes are dispatched to a pool of `--workers` goroutines via a buffered
-channel (`--queue` capacity). This decouples HTTP response latency from disk
-I/O — the handler returns as soon as jobs are enqueued, and writers flush to
-disk in the background. On `SIGINT`/`SIGTERM`:
-
-1. The HTTP server stops accepting new connections and waits for in-flight
-   handlers to complete.
-2. The write queue is closed and all workers drain their remaining jobs.
-3. The process exits only after every queued file has been written.
 
 ## Protocol notes
 
@@ -401,3 +310,15 @@ disk in the background. On `SIGINT`/`SIGTERM`:
 21  uint16 LE  Wind gust speed    (1/10 mph, 10-min rolling max; 0x7FFF = not yet available)
 23  uint16 LE  Wind gust direction(1–360 °, 0 = calm)
 ```
+
+## Changelog
+
+- **v0.6** — MIT license; `--version` flag; OpenWrt 25.12 packaging with LuCI
+  app; **removed the legacy API mode and `legacyserver`** (preserved on the
+  `legacy` branch)
+- **v0.1–v0.5** — serial protocol hardening, offline buffer with dead-letter
+  queue, `--no-db` stateless mode, backlog replay hardening
+
+## License
+
+[MIT](LICENSE) © meteogargano
