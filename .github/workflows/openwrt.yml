@@ -31,7 +31,9 @@ jobs:
         env:
           ARCH: ${{ matrix.sdk }}
           PACKAGES: "davisweather luci-app-davisweather"
-          FEED_DIR: ${{ github.workspace }}/openwrt
+          # No FEED_DIR: mount the whole workspace at /feed (default). Mounting
+          # only openwrt/ would break the action's shfmt check, which runs
+          # git-diff inside /feed and needs the repository's .git directory.
           BUILD_LOG: 1
           IGNORE_ERRORS: 'n'
           NO_REFRESH_CHECK: 1
