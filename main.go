@@ -30,6 +30,11 @@ import (
 	"github.com/jedib0t/go-pretty/v6/table"
 )
 
+// version is overridden at build time via:
+//
+//	go build -ldflags "-X main.version=0.6"
+var version = "dev"
+
 func main() {
 	// ── Flags ────────────────────────────────────────────────────────────────
 	portName := flag.String("port", "", "Serial port, e.g. /dev/ttyUSB0 or COM3 (required)")
@@ -41,13 +46,13 @@ func main() {
 	noDB := flag.Bool("no-db", false, "Stateless mode: no SQLite database and no offline buffering. Failed uploads are dropped; the next interval retries with fresh data (ignores --db)")
 	bucket := flag.String("bucket", "0.2mm", "Rain bucket size per click: 0.2mm or 0.01in")
 	dryRun := flag.Bool("dry-run", false, "Read one packet, print values and exit (no upload, no DB)")
-
-	withLegacyAPI := flag.Bool("with-legacy-api", false, "Send to both Voria2 and the legacy API (mutually exclusive with --only-legacy-api)")
-	onlyLegacyAPI := flag.Bool("only-legacy-api", false, "Send only to the legacy API, skipping Voria2 (mutually exclusive with --with-legacy-api)")
-	legacyAPIURL := flag.String("legacy-api-url", "", "Legacy API base URL (required with --with-legacy-api / --only-legacy-api)")
-	legacyAPIKey := flag.String("legacy-api-key", "", "Legacy API authorization key (required with --with-legacy-api / --only-legacy-api)")
-	legacyAPIStation := flag.String("legacy-api-station", "", "Legacy station identifier appended to the URL path (required with --with-legacy-api / --only-legacy-api)")
+	showVersion := flag.Bool("version", false, "Print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("davisweather %s\n", version)
+		return
+	}
 
 	if *portName == "" {
 		log.Fatal("--port is required.  Example: --port /dev/ttyUSB0")
@@ -86,29 +91,11 @@ func main() {
 	}
 
 	// ── Daemon-mode validation ────────────────────────────────────────────────
-	if *withLegacyAPI && *onlyLegacyAPI {
-		log.Fatal("--with-legacy-api and --only-legacy-api are mutually exclusive")
+	if *apiURL == "" {
+		log.Fatal("--api-url is required.  Example: --api-url https://api.voria2.io")
 	}
-	legacyEnabled := *withLegacyAPI || *onlyLegacyAPI
-
-	if !*onlyLegacyAPI {
-		if *apiURL == "" {
-			log.Fatal("--api-url is required.  Example: --api-url https://api.voria2.io")
-		}
-		if *apiKey == "" {
-			log.Fatal("--api-key is required.  Example: --api-key vsk_xxxxxxxxxxxxxxxxxxxx")
-		}
-	}
-	if legacyEnabled {
-		if *legacyAPIURL == "" {
-			log.Fatal("--legacy-api-url is required with --with-legacy-api / --only-legacy-api")
-		}
-		if *legacyAPIKey == "" {
-			log.Fatal("--legacy-api-key is required with --with-legacy-api / --only-legacy-api")
-		}
-		if *legacyAPIStation == "" {
-			log.Fatal("--legacy-api-station is required with --with-legacy-api / --only-legacy-api")
-		}
+	if *apiKey == "" {
+		log.Fatal("--api-key is required.  Example: --api-key vsk_xxxxxxxxxxxxxxxxxxxx")
 	}
 	interval, err := time.ParseDuration(*intervalStr)
 	if err != nil || interval <= 0 {
@@ -134,25 +121,16 @@ func main() {
 		log.Printf("SQLite buffer: %s", *dbPath)
 	}
 
-	// ── API clients ───────────────────────────────────────────────────────────
-	var client *APIClient
-	if !*onlyLegacyAPI {
-		client = newAPIClient(*apiURL, *apiKey)
-		if station, err := client.verifyKey(); err != nil {
-			if *noDB {
-				log.Printf("Voria2 key verification failed: %v (continuing – failed uploads will be dropped)", err)
-			} else {
-				log.Printf("Voria2 key verification failed: %v (continuing – readings will buffer locally)", err)
-			}
+	// ── API client ────────────────────────────────────────────────────────────
+	client := newAPIClient(*apiURL, *apiKey)
+	if station, err := client.verifyKey(); err != nil {
+		if *noDB {
+			log.Printf("Voria2 key verification failed: %v (continuing – failed uploads will be dropped)", err)
 		} else {
-			log.Printf("Voria2 station verified: %s", station)
+			log.Printf("Voria2 key verification failed: %v (continuing – readings will buffer locally)", err)
 		}
-	}
-
-	var legacyClient *LegacyClient
-	if legacyEnabled {
-		legacyClient = newLegacyClient(*legacyAPIURL, *legacyAPIKey, *legacyAPIStation)
-		log.Printf("Legacy API enabled: %s (station: %s)", *legacyAPIURL, *legacyAPIStation)
+	} else {
+		log.Printf("Voria2 station verified: %s", station)
 	}
 
 	// ── Graceful shutdown ────────────────────────────────────────────────────
@@ -162,7 +140,7 @@ func main() {
 	// ── Run loop ─────────────────────────────────────────────────────────────
 	log.Printf("Polling every %s. Press Ctrl+C to stop.", interval)
 
-	runTick(*portName, *baud, db, client, legacyClient, bucketMM)
+	runTick(*portName, *baud, db, client, bucketMM)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -170,7 +148,7 @@ func main() {
 	for {
 		select {
 		case <-ticker.C:
-			runTick(*portName, *baud, db, client, legacyClient, bucketMM)
+			runTick(*portName, *baud, db, client, bucketMM)
 		case <-ctx.Done():
 			log.Println("Received shutdown signal, exiting.")
 			return
@@ -178,9 +156,9 @@ func main() {
 	}
 }
 
-// runTick is called on every poll interval. It reads one LOOP packet then
-// dispatches to the Voria2 and/or legacy delivery paths independently.
-func runTick(portName string, baud int, db *sql.DB, client *APIClient, legacyClient *LegacyClient, bucketMM float64) {
+// runTick is called on every poll interval. It reads one LOOP packet and
+// uploads it to the Voria2 API.
+func runTick(portName string, baud int, db *sql.DB, client *APIClient, bucketMM float64) {
 	// ── Open serial port ─────────────────────────────────────────────────────
 	port, err := openSerialPort(portName, baud)
 	if err != nil {
@@ -208,19 +186,10 @@ func runTick(portName string, baud int, db *sql.DB, client *APIClient, legacyCli
 
 	now := time.Now().UTC()
 
-	if client != nil {
-		if db == nil {
-			runVoria2TickSimple(data, now, client, bucketMM)
-		} else {
-			runVoria2Tick(data, now, db, client, bucketMM)
-		}
-	}
-	if legacyClient != nil {
-		if db == nil {
-			runLegacyTickSimple(data, now, legacyClient, bucketMM)
-		} else {
-			runLegacyTick(data, now, db, legacyClient, bucketMM)
-		}
+	if db == nil {
+		runVoria2TickSimple(data, now, client, bucketMM)
+	} else {
+		runVoria2Tick(data, now, db, client, bucketMM)
 	}
 }
 
@@ -370,68 +339,6 @@ func runVoria2Tick(data *LOOPData, now time.Time, db *sql.DB, client *APIClient,
 	return
 }
 
-// legacyDrainMax is the maximum number of buffered legacy packets to drain per
-// tick. The legacy API is one-per-POST, so a large burst would delay the next
-// serial read; drain progressively across ticks instead.
-const legacyDrainMax = 50
-
-// runLegacyTick handles the legacy pipe-delimited packet delivery path for one
-// poll tick. It drains buffered packets oldest-first before sending the current
-// reading. Both paths are independent: a failure here does not affect Voria2.
-func runLegacyTick(data *LOOPData, now time.Time, db *sql.DB, lc *LegacyClient, bucketMM float64) {
-	packet := buildLegacyPacket(data, now, bucketMM)
-
-	// ── Drain buffered packets ────────────────────────────────────────────────
-	pending, err := loadLegacyPending(db, legacyDrainMax)
-	if err != nil {
-		log.Printf("loadLegacyPending error: %v (proceeding without buffered packets)", err)
-		pending = nil
-	}
-
-	var drainedIDs []int64
-	for _, row := range pending {
-		if sendErr := lc.sendPacket(row.Packet); sendErr != nil {
-			if isPermanent(sendErr) {
-				// 4xx: bad key or station – remove this row, keep draining.
-				log.Printf("Legacy: buffered packet id=%d rejected permanently: %v (removed from buffer)", row.ID, sendErr)
-				drainedIDs = append(drainedIDs, row.ID)
-			} else {
-				// Transient: stop draining, retry remaining rows next tick.
-				log.Printf("Legacy drain interrupted (transient): %v", sendErr)
-				break
-			}
-		} else {
-			drainedIDs = append(drainedIDs, row.ID)
-		}
-	}
-
-	if len(drainedIDs) > 0 {
-		if delErr := deleteLegacyPending(db, drainedIDs); delErr != nil {
-			log.Printf("deleteLegacyPending error: %v", delErr)
-		}
-	}
-
-	// ── Send current packet ───────────────────────────────────────────────────
-	if sendErr := lc.sendPacket(packet); sendErr != nil {
-		if isPermanent(sendErr) {
-			log.Printf("Legacy permanent error (check --legacy-api-key / --legacy-api-station): %v", sendErr)
-		} else {
-			log.Printf("Legacy upload failed (transient, will retry next tick): %v", sendErr)
-			if storeErr := storeLegacyPending(db, []string{packet}); storeErr != nil {
-				log.Printf("storeLegacyPending error: %v", storeErr)
-			} else {
-				n, _ := legacyPendingCount(db)
-				log.Printf("Legacy: buffered 1 packet; total pending: %d", n)
-			}
-		}
-		return
-	}
-
-	remaining, _ := legacyPendingCount(db)
-	log.Printf("Legacy tick OK: sent current packet + drained %d buffered; buffer remaining: %d",
-		len(drainedIDs), remaining)
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // No-DB mode (--no-db)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -461,23 +368,6 @@ func runVoria2TickSimple(data *LOOPData, now time.Time, client *APIClient, bucke
 		log.Printf("Voria2: measurement index %d rejected permanently, dropped: %s", r.Index, r.Error)
 	}
 	log.Printf("Voria2 tick OK: sent %d measurements, API accepted %d/%d", len(current), okCount, len(current))
-}
-
-// runLegacyTickSimple is the --no-db variant of runLegacyTick: it sends only
-// the current packet, with no buffering and no drain loop. Any failure drops
-// the packet; the next interval tick starts fresh.
-func runLegacyTickSimple(data *LOOPData, now time.Time, lc *LegacyClient, bucketMM float64) {
-	packet := buildLegacyPacket(data, now, bucketMM)
-
-	if err := lc.sendPacket(packet); err != nil {
-		if isPermanent(err) {
-			log.Printf("Legacy permanent error (check --legacy-api-key / --legacy-api-station), dropping packet: %v", err)
-		} else {
-			log.Printf("Legacy upload failed (transient), dropping packet until next tick: %v", err)
-		}
-		return
-	}
-	log.Println("Legacy tick OK: sent current packet")
 }
 
 func printResults(d *LOOPData, bucketMM float64) {
