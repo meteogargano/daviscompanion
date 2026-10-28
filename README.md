@@ -267,6 +267,20 @@ make package/luci-app-davisweather/compile V=s
 
 Binaries land in `bin/packages/<arch>/davis/`.
 
+### Cutting a new release
+
+Because the feed Makefile lives in the repository it downloads, the source
+URL is pinned to a commit and hashed (see the Makefile comment). Per release:
+
+1. Commit and push the release content.
+2. Compute the tarball hash for that commit:
+   `curl -sfL https://codeload.github.com/meteogargano/daviscompanion/tar.gz/<full-sha> | shasum -a 256`
+3. Update `PKG_VERSION`, `PKG_SOURCE_URL` (new sha) and `PKG_HASH` in
+   `openwrt/davisweather/Makefile`, commit and push (this bookkeeping commit
+   stays out of the tarball, by design).
+4. Tag `v<version>` and push the tag — the workflow builds and attaches the
+   `.apk` files to the GitHub Release.
+
 ## Building from source
 
 ```bash
