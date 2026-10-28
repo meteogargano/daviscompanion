@@ -14,11 +14,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64,                   sdk: x86_64-openwrt-25.12 }
+          # Enabled: 64-bit ARM (Pi 3/4/5, most ARM64 routers) and
+          # 32-bit ARM v7 (Pi 2, many ARM routers).
+          # Uncomment to build additional targets:
           - { arch: aarch64_generic,          sdk: aarch64_generic-openwrt-25.12 }
           - { arch: arm_cortex-a7_neon-vfpv4, sdk: arm_cortex-a7_neon-vfpv4-openwrt-25.12 }
-          - { arch: mips_24kc,                sdk: mips_24kc-openwrt-25.12 }
-          - { arch: mipsel_24kc,              sdk: mipsel_24kc-openwrt-25.12 }
+          # - { arch: x86_64,                   sdk: x86_64-openwrt-25.12 }
+          # - { arch: mips_24kc,                sdk: mips_24kc-openwrt-25.12 }
+          # - { arch: mipsel_24kc,              sdk: mipsel_24kc-openwrt-25.12 }
 
     steps:
       - uses: actions/checkout@v4

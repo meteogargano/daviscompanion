@@ -185,11 +185,13 @@ than this project requires). The packaging lives in [`openwrt/`](openwrt/):
 
 ### Install from GitHub Releases
 
-Prebuilt `.apk` packages for `x86_64`, `aarch64_generic`,
-`arm_cortex-a7_neon-vfpv4`, `mips_24kc` and `mipsel_24kc` are attached to each
-[release](https://github.com/meteogargano/daviscompanion/releases). Download the
-`.apk` for your architecture plus the LuCI app (arch-independent), copy them to
-the router and install:
+Prebuilt `.apk` packages for `aarch64_generic` (Pi 3/4/5, most ARM64
+routers) and `arm_cortex-a7_neon-vfpv4` (Pi 2, many ARM routers) are attached
+to each [release](https://github.com/meteogargano/daviscompanion/releases);
+more targets can be enabled in
+[`.github/workflows/openwrt.yml`](.github/workflows/openwrt.yml). Download
+the `.apk` for your architecture plus the LuCI app (arch-independent), copy
+them to the router and install:
 
 ```sh
 scp davisweather-0.6-r1-<arch>.apk luci-app-davisweather-0.6-r1-all.apk root@192.168.1.1:/tmp/

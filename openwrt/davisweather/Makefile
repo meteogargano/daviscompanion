@@ -30,8 +30,11 @@ GO_PKG_BUILD_PKG:=github.com/meteogargano/davisweather
 GO_PKG_LDFLAGS_X:=main.version=$(PKG_VERSION)
 
 include $(INCLUDE_DIR)/package.mk
-# golang build helpers come from the official packages feed
-include ../../packages/lang/golang/golang-package.mk
+# The golang build helpers live in the official packages feed. This package
+# comes from an external feed, so the include path must be absolute
+# (a relative ../../packages path breaks when the feed is bind-mounted at a
+# different location, e.g. in the gh-action-sdk container).
+include $(TOPDIR)/feeds/packages/lang/golang/golang-package.mk
 
 define Package/davisweather
   SECTION:=utils
