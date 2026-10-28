@@ -12,9 +12,11 @@ PKG_RELEASE:=1
 
 PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 PKG_SOURCE_URL:=https://codeload.github.com/meteogargano/daviscompanion/tar.gz/v$(PKG_VERSION)?
-# No PKG_HASH: the feed Makefile lives inside the same repository it
-# downloads, so a source hash would be self-referential. The buildroot only
-# emits a "no hash" warning; the URL is fixed and served over HTTPS.
+# The feed Makefile lives inside the same repository it downloads, so a
+# source hash would be self-referential. "skip" is the supported opt-out
+# (verified in scripts/download.pl of openwrt-25.12): without it the SDK
+# passes a placeholder hash and download.pl aborts.
+PKG_HASH:=skip
 PKG_BUILD_DIR:=$(BUILD_DIR)/daviscompanion-$(PKG_VERSION)
 
 PKG_MAINTAINER:=meteogargano <meteogargano@users.noreply.github.com>
