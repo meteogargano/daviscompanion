@@ -2,7 +2,8 @@
 
 A Go daemon that reads current conditions from a **Davis Vantage Pro / Pro2 / Vue**
 console via the WeatherLink serial interface and continuously uploads measurements
-to the **Voria2 Ingest API**, with automatic local buffering when offline.
+to the **Voria2 Ingest API**, with automatic local buffering when offline
+(can be disabled with `--no-db` for a fully stateless setup).
 
 Implements the Davis Serial Communication Reference Manual, Rev 2.6.1.
 
@@ -99,6 +100,28 @@ or `--only-legacy-api` to skip Voria2 entirely.
 
 Stop cleanly with **Ctrl+C** or `SIGTERM`.
 
+### Stateless mode (no database)
+
+Add `--no-db` to any daemon-mode invocation to disable the SQLite buffer
+entirely — no database file is opened or created. Each tick uploads the fresh
+readings; if the API is unreachable the readings are **dropped** and the next
+tick tries again with new data. Applies to both the Voria2 and legacy API
+paths, and can be combined with `--with-legacy-api` / `--only-legacy-api`.
+
+```bash
+./davisweather \
+  --port    /dev/ttyUSB0 \
+  --api-url https://api.voria2.io \
+  --api-key vsk_xxxxxxxxxxxxxxxxxxxx \
+  --no-db
+```
+
+| Event | Behavior |
+|---|---|
+| Upload OK | Readings accepted, tick logged |
+| Network error / HTTP 5xx | Readings dropped, warning logged, retried next tick with fresh data |
+| HTTP 4xx (bad key, bad slug) | Readings dropped, warning logged |
+
 ## Flags
 
 | Flag | Default | Description |
@@ -109,7 +132,8 @@ Stop cleanly with **Ctrl+C** or `SIGTERM`.
 | `--dry-run` | `false` | Read one packet, print values and exit (no upload, no DB) |
 | `--bucket` | `0.2mm` | Rain bucket size per click: `0.2mm` (metric) or `0.01in` (imperial/US) |
 | `--interval` | `2m` | Poll interval as a Go duration: `30s`, `2m`, `5m`, … |
-| `--db` | `./weather.db` | SQLite offline buffer path |
+| `--db` | `./weather.db` | SQLite offline buffer path (ignored with `--no-db`) |
+| `--no-db` | `false` | Stateless mode: disable SQLite entirely; failed uploads are dropped and retried with fresh data on the next tick |
 | `--baud` | `19200` | Baud rate (Davis default is 19200) |
 | `--with-legacy-api` | `false` | Send to both Voria2 **and** the legacy API |
 | `--only-legacy-api` | `false` | Send **only** to the legacy API; skip Voria2 entirely |
@@ -166,6 +190,8 @@ Content-Type: text/plain
 
 ### Offline buffering (legacy)
 
+*Also disabled by `--no-db`.*
+
 Because the legacy API accepts one packet per request, the daemon drains up to
 **50 buffered packets per tick** during recovery (vs 995 for Voria2). Both
 buffers are independent — a Voria2 failure does not prevent legacy delivery, and
@@ -213,6 +239,9 @@ The following slugs are hardcoded and must exist in your Voria2 station:
 All timestamps are sent in **UTC** (`2006-01-02T15:04:05Z`).
 
 ## Offline buffering
+
+*This section applies to default (buffered) mode. With `--no-db` there is no
+buffer — failed uploads are dropped (see [Stateless mode](#stateless-mode-no-database)).*
 
 When the API cannot be reached, each tick's readings (5 rows) are stored in the
 local SQLite database. On the next successful tick the daemon automatically drains

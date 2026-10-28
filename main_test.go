@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -191,6 +192,120 @@ func TestRunVoria2TickMovesRejectedRowsToDeadLetter(t *testing.T) {
 	}
 	if !reflect.DeepEqual(deadRows[0].Payload, pendingPayloads[1]) {
 		t.Fatalf("expected dead-letter payload %#v, got %#v", pendingPayloads[1], deadRows[0].Payload)
+	}
+}
+
+func TestRunVoria2TickSimpleSendsCurrentOnly(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	var captured [][]map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var batch []map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&batch); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		captured = append(captured, batch)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true,"count":5,"results":[{"index":0,"ok":true},{"index":1,"ok":true},{"index":2,"ok":true},{"index":3,"ok":true},{"index":4,"ok":true}]}`))
+	}))
+	defer server.Close()
+
+	client := newAPIClient(server.URL, "test-key")
+	runVoria2TickSimple(testLoopData(), now, client, 0.2)
+
+	want := buildMeasurements(testLoopData(), now, 0.2)
+	if len(captured) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(captured))
+	}
+	if !reflect.DeepEqual(captured[0], want) {
+		t.Fatalf("expected current readings only %#v, got %#v", want, captured[0])
+	}
+}
+
+func TestRunVoria2TickSimpleDropsOnTransientError(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		requests++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	client := newAPIClient(server.URL, "test-key")
+	runVoria2TickSimple(testLoopData(), now, client, 0.2)
+
+	if requests != 1 {
+		t.Fatalf("expected exactly 1 request (no retry), got %d", requests)
+	}
+}
+
+func TestRunVoria2TickSimpleDropsOnPermanentError(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		requests++
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	client := newAPIClient(server.URL, "test-key")
+	runVoria2TickSimple(testLoopData(), now, client, 0.2)
+
+	if requests != 1 {
+		t.Fatalf("expected exactly 1 request (no retry), got %d", requests)
+	}
+}
+
+func TestRunLegacyTickSimpleSendsCurrentPacket(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	var bodies []string
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		body, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, string(body))
+		paths = append(paths, r.URL.Path)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	lc := newLegacyClient(server.URL, "test-key", "MYSTATION")
+	runLegacyTickSimple(testLoopData(), now, lc, 0.2)
+
+	want := buildLegacyPacket(testLoopData(), now, 0.2)
+	if len(bodies) != 1 {
+		t.Fatalf("expected 1 request, got %d", len(bodies))
+	}
+	if bodies[0] != want {
+		t.Fatalf("expected packet %q, got %q", want, bodies[0])
+	}
+	if paths[0] != "/MYSTATION" {
+		t.Fatalf("expected path /MYSTATION, got %s", paths[0])
+	}
+}
+
+func TestRunLegacyTickSimpleDropsOnFailure(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		requests++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	lc := newLegacyClient(server.URL, "test-key", "MYSTATION")
+	runLegacyTickSimple(testLoopData(), now, lc, 0.2)
+
+	if requests != 1 {
+		t.Fatalf("expected exactly 1 request (no retry), got %d", requests)
 	}
 }
 

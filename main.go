@@ -1,7 +1,9 @@
 // davisweather – continuous daemon that reads a Davis Vantage Pro / Pro2 / Vue
 // console via serial, uploads measurements to the Voria2 Ingest API, and
 // buffers undeliverable readings in a local SQLite database for automatic
-// retry.
+// retry. With --no-db the SQLite buffer is disabled: uploads become
+// fire-and-forget, failed readings are dropped, and the next interval tick
+// retries with fresh data.
 //
 // Usage:
 //
@@ -9,6 +11,8 @@
 //	             --api-key vsk_xxxx
 //	davisweather --port /dev/ttyUSB0 --api-url https://api.voria2.io \
 //	             --api-key vsk_xxxx --interval 5m --db /var/lib/davis/wx.db
+//	davisweather --port /dev/ttyUSB0 --api-url https://api.voria2.io \
+//	             --api-key vsk_xxxx --no-db
 package main
 
 import (
@@ -34,6 +38,7 @@ func main() {
 	apiKey := flag.String("api-key", "", "Voria2 API key starting with vsk_ (required in daemon mode)")
 	intervalStr := flag.String("interval", "2m", "Poll interval, e.g. 30s, 2m, 5m")
 	dbPath := flag.String("db", "./weather.db", "SQLite buffer database path")
+	noDB := flag.Bool("no-db", false, "Stateless mode: no SQLite database and no offline buffering. Failed uploads are dropped; the next interval retries with fresh data (ignores --db)")
 	bucket := flag.String("bucket", "0.2mm", "Rain bucket size per click: 0.2mm or 0.01in")
 	dryRun := flag.Bool("dry-run", false, "Read one packet, print values and exit (no upload, no DB)")
 
@@ -112,19 +117,33 @@ func main() {
 	log.Printf("Rain bucket: %s (%.4f mm/click)", *bucket, bucketMM)
 
 	// ── SQLite ───────────────────────────────────────────────────────────────
-	db, err := openDB(*dbPath)
-	if err != nil {
-		log.Fatalf("open db %s: %v", *dbPath, err)
+	var db *sql.DB
+	if *noDB {
+		flag.Visit(func(f *flag.Flag) {
+			if f.Name == "db" {
+				log.Println("--db is ignored in --no-db mode")
+			}
+		})
+		log.Println("SQLite buffer: disabled (--no-db) – failed uploads are dropped")
+	} else {
+		db, err = openDB(*dbPath)
+		if err != nil {
+			log.Fatalf("open db %s: %v", *dbPath, err)
+		}
+		defer db.Close()
+		log.Printf("SQLite buffer: %s", *dbPath)
 	}
-	defer db.Close()
-	log.Printf("SQLite buffer: %s", *dbPath)
 
 	// ── API clients ───────────────────────────────────────────────────────────
 	var client *APIClient
 	if !*onlyLegacyAPI {
 		client = newAPIClient(*apiURL, *apiKey)
 		if station, err := client.verifyKey(); err != nil {
-			log.Printf("Voria2 key verification failed: %v (continuing – readings will buffer locally)", err)
+			if *noDB {
+				log.Printf("Voria2 key verification failed: %v (continuing – failed uploads will be dropped)", err)
+			} else {
+				log.Printf("Voria2 key verification failed: %v (continuing – readings will buffer locally)", err)
+			}
 		} else {
 			log.Printf("Voria2 station verified: %s", station)
 		}
@@ -190,10 +209,18 @@ func runTick(portName string, baud int, db *sql.DB, client *APIClient, legacyCli
 	now := time.Now().UTC()
 
 	if client != nil {
-		runVoria2Tick(data, now, db, client, bucketMM)
+		if db == nil {
+			runVoria2TickSimple(data, now, client, bucketMM)
+		} else {
+			runVoria2Tick(data, now, db, client, bucketMM)
+		}
 	}
 	if legacyClient != nil {
-		runLegacyTick(data, now, db, legacyClient, bucketMM)
+		if db == nil {
+			runLegacyTickSimple(data, now, legacyClient, bucketMM)
+		} else {
+			runLegacyTick(data, now, db, legacyClient, bucketMM)
+		}
 	}
 }
 
@@ -403,6 +430,54 @@ func runLegacyTick(data *LOOPData, now time.Time, db *sql.DB, lc *LegacyClient, 
 	remaining, _ := legacyPendingCount(db)
 	log.Printf("Legacy tick OK: sent current packet + drained %d buffered; buffer remaining: %d",
 		len(drainedIDs), remaining)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// No-DB mode (--no-db)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// runVoria2TickSimple is the --no-db variant of runVoria2Tick: it uploads only
+// the current readings, with no SQLite buffer and no backlog logic. Any
+// failure drops the readings; the next interval tick starts fresh.
+func runVoria2TickSimple(data *LOOPData, now time.Time, client *APIClient, bucketMM float64) {
+	current := buildMeasurements(data, now, bucketMM)
+
+	result, err := client.bulkPost(current)
+	if err != nil {
+		if isPermanent(err) {
+			log.Printf("Voria2 permanent error (check --api-key and sensor slugs), dropping %d measurements: %v", len(current), err)
+		} else {
+			log.Printf("Voria2 upload failed (transient), dropping %d measurements until next tick: %v", len(current), err)
+		}
+		return
+	}
+
+	okCount := 0
+	for _, r := range result.Results {
+		if r.OK {
+			okCount++
+			continue
+		}
+		log.Printf("Voria2: measurement index %d rejected permanently, dropped: %s", r.Index, r.Error)
+	}
+	log.Printf("Voria2 tick OK: sent %d measurements, API accepted %d/%d", len(current), okCount, len(current))
+}
+
+// runLegacyTickSimple is the --no-db variant of runLegacyTick: it sends only
+// the current packet, with no buffering and no drain loop. Any failure drops
+// the packet; the next interval tick starts fresh.
+func runLegacyTickSimple(data *LOOPData, now time.Time, lc *LegacyClient, bucketMM float64) {
+	packet := buildLegacyPacket(data, now, bucketMM)
+
+	if err := lc.sendPacket(packet); err != nil {
+		if isPermanent(err) {
+			log.Printf("Legacy permanent error (check --legacy-api-key / --legacy-api-station), dropping packet: %v", err)
+		} else {
+			log.Printf("Legacy upload failed (transient), dropping packet until next tick: %v", err)
+		}
+		return
+	}
+	log.Println("Legacy tick OK: sent current packet")
 }
 
 func printResults(d *LOOPData, bucketMM float64) {
