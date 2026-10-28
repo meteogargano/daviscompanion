@@ -1,0 +1,14 @@
+{
+	"luci-app-davisweather": {
+		"description": "Grant access to davisweather configuration",
+		"read": {
+			"ubus": {
+				"luci": [ "getInitList" ]
+			},
+			"uci": [ "davisweather" ]
+		},
+		"write": {
+			"uci": [ "davisweather" ]
+		}
+	}
+}

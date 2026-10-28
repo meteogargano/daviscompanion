@@ -1,0 +1,14 @@
+{
+	"admin/services/davisweather": {
+		"title": "Davis Weather",
+		"order": 90,
+		"action": {
+			"type": "view",
+			"path": "davisweather/config"
+		},
+		"depends": {
+			"acl": [ "luci-app-davisweather" ],
+			"uci": { "davisweather": true }
+		}
+	}
+}

@@ -1,0 +1,77 @@
+name: OpenWrt Packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64,                   sdk: x86_64-openwrt-25.12 }
+          - { arch: aarch64_generic,          sdk: aarch64_generic-openwrt-25.12 }
+          - { arch: arm_cortex-a7_neon-vfpv4, sdk: arm_cortex-a7_neon-vfpv4-openwrt-25.12 }
+          - { arch: mips_24kc,                sdk: mips_24kc-openwrt-25.12 }
+          - { arch: mipsel_24kc,              sdk: mipsel_24kc-openwrt-25.12 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build packages
+        uses: openwrt/gh-action-sdk@main
+        env:
+          ARCH: ${{ matrix.sdk }}
+          PACKAGES: "davisweather luci-app-davisweather"
+          FEED_DIR: ${{ github.workspace }}/openwrt
+          BUILD_LOG: 1
+          IGNORE_ERRORS: 'n'
+          NO_REFRESH_CHECK: 1
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.arch }}
+          path: |
+            bin/packages/${{ matrix.arch }}/action/*.apk
+            bin/packages/${{ matrix.arch }}/action/*.ipk
+          if-no-files-found: error
+
+  release:
+    name: Attach packages to release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect packages
+        run: |
+          mkdir -p release
+          find artifacts -type f \( -name '*.apk' -o -name '*.ipk' \) | while read -r f; do
+            arch=$(echo "$f" | cut -d/ -f2 | sed 's/^packages-//')
+            base=$(basename "$f")
+            # arch-independent packages (luci-app) are identical everywhere: keep one copy
+            case "$base" in
+              luci-app-*) dest="$base" ;;
+              *) dest="${arch}_${base}" ;;
+            esac
+            cp "$f" "release/$dest"
+          done
+          ls -la release
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release/*
+          generate_release_notes: true
