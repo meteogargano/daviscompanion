@@ -275,9 +275,12 @@ URL is pinned to a commit and hashed (see the Makefile comment). Per release:
 1. Commit and push the release content.
 2. Compute the tarball hash for that commit:
    `curl -sfL https://codeload.github.com/meteogargano/daviscompanion/tar.gz/<full-sha> | shasum -a 256`
-3. Update `PKG_VERSION`, `PKG_SOURCE_URL` (new sha) and `PKG_HASH` in
+3. Update `PKG_VERSION`, `PKG_REF` (new sha) and `PKG_HASH` in
    `openwrt/davisweather/Makefile`, commit and push (this bookkeeping commit
-   stays out of the tarball, by design).
+   stays out of the tarball, by design). `PKG_REF` feeds both the source URL
+   and `PKG_BUILD_DIR` — codeload names the tarball root dir after the ref,
+   and the build dir must match it exactly or the unpack lands next to it and
+   the build fails with `go.mod file not found`.
 4. Tag `v<version>` and push the tag — the workflow builds and attaches the
    `.apk` files to the GitHub Release.
 
