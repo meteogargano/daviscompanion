@@ -7,7 +7,7 @@ automatic local buffering when offline (can be disabled with `--no-db` for a
 fully stateless setup).
 
 Runs on Linux, macOS and Windows directly, and is packaged for
-**OpenWrt 25.12+** with a LuCI configuration page (see
+**OpenWrt 24.10 and 25.12** with a LuCI configuration page (see
 [OpenWrt](#openwrt)).
 
 Implements the Davis Serial Communication Reference Manual, Rev 2.6.1.
@@ -174,9 +174,10 @@ sqlite3 weather.db "SELECT id, created_at, json_extract(payload,'$.sensor') FROM
 
 ## OpenWrt
 
-`davisweather` is packaged for **OpenWrt 25.12 and newer** (the apk-based
-release; 24.10 with opkg is *not* supported because its Go toolchain is older
-than this project requires). The packaging lives in [`openwrt/`](openwrt/):
+`davisweather` is packaged for **OpenWrt 25.12** (apk, `.apk` packages) and
+**OpenWrt 24.10** (opkg, `.ipk` packages). The Go module targets `go 1.23`,
+the toolchain vintage both release feeds satisfy (25.12 ships golang 1.26,
+24.10 ships 1.23.12). The packaging lives in [`openwrt/`](openwrt/):
 
 - `davisweather` — the daemon, a UCI config (`/etc/config/davisweather`) and a
   procd init script with automatic restart on config changes
@@ -185,21 +186,33 @@ than this project requires). The packaging lives in [`openwrt/`](openwrt/):
 
 ### Install from GitHub Releases
 
-Prebuilt `.apk` packages for `aarch64_generic` (Pi 3/4/5, most ARM64
-routers) and `arm_cortex-a7_neon-vfpv4` (Pi 2, many ARM routers) are attached
-to each [release](https://github.com/meteogargano/daviscompanion/releases);
-more targets can be enabled in
-[`.github/workflows/openwrt.yml`](.github/workflows/openwrt.yml). Download
-the `.apk` for your architecture plus the LuCI app (arch-independent), copy
-them to the router and install:
+Prebuilt packages for `aarch64_generic` (Pi 3/4/5, most ARM64 routers) and
+`arm_cortex-a7_neon-vfpv4` (Pi 2, many ARM routers) are attached to each
+[release](https://github.com/meteogargano/daviscompanion/releases); more
+targets can be enabled in
+[`.github/workflows/openwrt.yml`](.github/workflows/openwrt.yml). Daemon
+packages are named `openwrt-<release>_<arch>_…`, the LuCI app is
+arch-independent (one file per package format). Download the files for your
+release and architecture, copy them to the router and install.
+
+**OpenWrt 25.12 (apk):**
 
 ```sh
-scp davisweather-0.6-r1-<arch>.apk luci-app-davisweather-0.6-r1-all.apk root@192.168.1.1:/tmp/
+scp openwrt-25.12_<arch>_davisweather-0.6-r1.apk luci-app-davisweather-0.6-r1.apk root@192.168.1.1:/tmp/
 ssh root@192.168.1.1
-apk add --allow-untrusted /tmp/davisweather-*.apk /tmp/luci-app-davisweather-*.apk
+apk add --allow-untrusted /tmp/openwrt-25.12_*davisweather-*.apk /tmp/luci-app-davisweather-*.apk
 ```
 
-> The packages are unsigned (personal build), hence `--allow-untrusted`.
+**OpenWrt 24.10 (opkg):**
+
+```sh
+scp openwrt-24.10_<arch>_davisweather-0.6-r1.ipk luci-app-davisweather-0.6-r1.ipk root@192.168.1.1:/tmp/
+ssh root@192.168.1.1
+opkg install /tmp/openwrt-24.10_*davisweather-*.ipk /tmp/luci-app-davisweather-*.ipk
+```
+
+> The apk packages are unsigned (personal build), hence `--allow-untrusted`;
+opkg installs unsigned `.ipk` files by default.
 
 Requirements on the router:
 
@@ -244,13 +257,14 @@ restarts the service via its procd reload trigger.
 
 **Logs:** `logread -e davisweather` (the daemon logs to syslog via procd).
 
-Uninstall: `apk del luci-app-davisweather davisweather` — `/etc/config/davisweather`
-is preserved as a conffile.
+Uninstall: `apk del luci-app-davisweather davisweather` on 25.12,
+`opkg remove luci-app-davisweather davisweather` on 24.10 — in both cases
+`/etc/config/davisweather` is preserved as a conffile.
 
 ### Building the packages yourself
 
-Use the [OpenWrt SDK](https://downloads.openwrt.org/releases/25.12.0/) for your
-target and add this repository's `openwrt/` directory as a feed:
+Use the [OpenWrt SDK](https://downloads.openwrt.org/releases/) for your target
+(25.12 or 24.10) and add this repository's `openwrt/` directory as a feed:
 
 ```sh
 git clone https://github.com/meteogargano/daviscompanion.git
@@ -332,9 +346,9 @@ Cross-compile for Raspberry Pi (armv7 / arm64):
 
 ## Changelog
 
-- **v0.6** — MIT license; `--version` flag; OpenWrt 25.12 packaging with LuCI
-  app; **removed the legacy API mode and `legacyserver`** (preserved on the
-  `legacy` branch)
+- **v0.6** — MIT license; `--version` flag; OpenWrt packaging (25.12 apk +
+  24.10 opkg) with LuCI app; **removed the legacy API mode and
+  `legacyserver`** (preserved on the `legacy` branch)
 - **v0.1–v0.5** — serial protocol hardening, offline buffer with dead-letter
   queue, `--no-db` stateless mode, backlog replay hardening
 

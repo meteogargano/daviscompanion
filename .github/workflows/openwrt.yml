@@ -8,22 +8,27 @@ on:
 
 jobs:
   build:
-    name: Build ${{ matrix.arch }}
+    name: Build OpenWrt ${{ matrix.version }} / ${{ matrix.arch }}
     runs-on: self-hosted
     strategy:
       fail-fast: false
       matrix:
         include:
-          # All supported targets are enabled (fail-fast: false — one arch
-          # failing does not block the others).
-          # 64-bit ARM: Pi 3/4/5, most ARM64 routers; ARM v7: Pi 2, many ARM
-          # routers; x86_64: soft routers; mips/mipsel: typical ath79/ramips
-          # hardware. Go builds for all five; note mips targets are soft-float.
-          - { arch: aarch64_generic,          sdk: aarch64_generic-openwrt-25.12 }
-          - { arch: arm_cortex-a7_neon-vfpv4, sdk: arm_cortex-a7_neon-vfpv4-openwrt-25.12 }
-          #- { arch: x86_64,                   sdk: x86_64-openwrt-25.12 }
-          #- { arch: mips_24kc,                sdk: mips_24kc-openwrt-25.12 }
-          #- { arch: mipsel_24kc,              sdk: mipsel_24kc-openwrt-25.12 }
+          # One entry per (OpenWrt release, arch). fail-fast: false — one
+          # target failing does not block the others.
+          # 25.12 = apk packages (.apk); 24.10 = opkg (.ipk).
+          # Enabled: 64-bit ARM (Pi 3/4/5, most ARM64 routers) and 32-bit
+          # ARM v7 (Pi 2, many ARM routers). Uncomment to add targets:
+          - { arch: aarch64_generic,          version: "25.12", sdk: aarch64_generic-openwrt-25.12 }
+          - { arch: arm_cortex-a7_neon-vfpv4, version: "25.12", sdk: arm_cortex-a7_neon-vfpv4-openwrt-25.12 }
+          - { arch: aarch64_generic,          version: "24.10", sdk: aarch64_generic-openwrt-24.10 }
+          - { arch: arm_cortex-a7_neon-vfpv4, version: "24.10", sdk: arm_cortex-a7_neon-vfpv4-openwrt-24.10 }
+          #- { arch: x86_64,                   version: "25.12", sdk: x86_64-openwrt-25.12 }
+          #- { arch: mips_24kc,                version: "25.12", sdk: mips_24kc-openwrt-25.12 }
+          #- { arch: mipsel_24kc,              version: "25.12", sdk: mipsel_24kc-openwrt-25.12 }
+          #- { arch: x86_64,                   version: "24.10", sdk: x86_64-openwrt-24.10 }
+          #- { arch: mips_24kc,                version: "24.10", sdk: mips_24kc-openwrt-24.10 }
+          #- { arch: mipsel_24kc,              version: "24.10", sdk: mipsel_24kc-openwrt-24.10 }
 
     steps:
       - uses: actions/checkout@v5
@@ -43,7 +48,7 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: packages-${{ matrix.arch }}
+          name: packages-${{ matrix.version }}-${{ matrix.arch }}
           path: |
             bin/packages/${{ matrix.arch }}/action/*.apk
             bin/packages/${{ matrix.arch }}/action/*.ipk
@@ -66,12 +71,17 @@ jobs:
         run: |
           mkdir -p release
           find artifacts -type f \( -name '*.apk' -o -name '*.ipk' \) | while read -r f; do
-            arch=$(echo "$f" | cut -d/ -f2 | sed 's/^packages-//')
+            # artifact dir: packages-<openwrt-version>-<arch>
+            tmp=$(echo "$f" | cut -d/ -f2)
+            ver=${tmp#packages-}; ver=${ver%%-*}
+            arch=${tmp#packages-${ver}-}
             base=$(basename "$f")
-            # arch-independent packages (luci-app) are identical everywhere: keep one copy
+            # luci-app is arch-independent per OpenWrt release: keep one copy
+            # per format — the extension (.apk for 25.12, .ipk for 24.10)
+            # already encodes the version, so the plain basename is unique.
             case "$base" in
               luci-app-*) dest="$base" ;;
-              *) dest="${arch}_${base}" ;;
+              *) dest="openwrt-${ver}_${arch}_${base}" ;;
             esac
             cp "$f" "release/$dest"
           done
