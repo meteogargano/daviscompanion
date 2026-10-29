@@ -3,7 +3,10 @@
 // buffers undeliverable readings in a local SQLite database for automatic
 // retry. With --no-db the SQLite buffer is disabled: uploads become
 // fire-and-forget, failed readings are dropped, and the next interval tick
-// retries with fresh data.
+// retries with fresh data. If --db is given but the database file is
+// inaccessible (disk failed to mount, read-only filesystem, ...), the
+// daemon degrades to stateless mode instead of exiting: uploads continue,
+// failed uploads are dropped until restart.
 //
 // Usage:
 //
@@ -115,16 +118,22 @@ func main() {
 	} else {
 		db, err = openDB(*dbPath)
 		if err != nil {
-			log.Fatalf("open db %s: %v", *dbPath, err)
+			// An inaccessible database (unmounted disk, read-only fs, ...) must
+			// not kill the daemon: degrade to stateless mode and keep uploading,
+			// exactly like --no-db. Restarting after the disk returns re-enables
+			// buffering (procd restarts us on failure anyway).
+			log.Printf("SQLite buffer unavailable: %v – continuing stateless, failed uploads will be dropped", err)
+			db = nil
+		} else {
+			defer db.Close()
+			log.Printf("SQLite buffer: %s", *dbPath)
 		}
-		defer db.Close()
-		log.Printf("SQLite buffer: %s", *dbPath)
 	}
 
 	// ── API client ────────────────────────────────────────────────────────────
 	client := newAPIClient(*apiURL, *apiKey)
 	if station, err := client.verifyKey(); err != nil {
-		if *noDB {
+		if db == nil {
 			log.Printf("Voria2 key verification failed: %v (continuing – failed uploads will be dropped)", err)
 		} else {
 			log.Printf("Voria2 key verification failed: %v (continuing – readings will buffer locally)", err)
