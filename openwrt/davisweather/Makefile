@@ -19,9 +19,9 @@ PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 # PKG_REF appears twice on purpose: codeload names the tarball root dir
 # after the ref, so PKG_BUILD_DIR must match it exactly or the unpack lands
 # next to PKG_BUILD_DIR and the build dies with "go.mod file not found".
-PKG_REF:=73cf2f4eee11c41d69b3e465f825456948166622
+PKG_REF:=16616e12d68a073124903229b2f230e00e3d31fa
 PKG_SOURCE_URL:=https://codeload.github.com/meteogargano/daviscompanion/tar.gz/$(PKG_REF)?
-PKG_HASH:=eebd05988de0e46b8d5ef01756bb01f7b4b45d6ad3f5f5986372c9dd8cd391da
+PKG_HASH:=48e344e17ae6c45217d58feefca7e9f0cc028f2130bdeacc88673478cfbad430
 PKG_BUILD_DIR:=$(BUILD_DIR)/daviscompanion-$(PKG_REF)
 
 PKG_MAINTAINER:=meteogargano <meteogargano@users.noreply.github.com>
