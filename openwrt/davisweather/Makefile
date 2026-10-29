@@ -16,9 +16,13 @@ PKG_SOURCE:=$(PKG_NAME)-$(PKG_VERSION).tar.gz
 # hashing the tarball of a tag that contains this file would be circular.
 # The pinned commit is the release content commit; this bookkeeping commit
 # on top is intentionally not part of the tarball.
-PKG_SOURCE_URL:=https://codeload.github.com/meteogargano/daviscompanion/tar.gz/73cf2f4eee11c41d69b3e465f825456948166622?
+# PKG_REF appears twice on purpose: codeload names the tarball root dir
+# after the ref, so PKG_BUILD_DIR must match it exactly or the unpack lands
+# next to PKG_BUILD_DIR and the build dies with "go.mod file not found".
+PKG_REF:=73cf2f4eee11c41d69b3e465f825456948166622
+PKG_SOURCE_URL:=https://codeload.github.com/meteogargano/daviscompanion/tar.gz/$(PKG_REF)?
 PKG_HASH:=eebd05988de0e46b8d5ef01756bb01f7b4b45d6ad3f5f5986372c9dd8cd391da
-PKG_BUILD_DIR:=$(BUILD_DIR)/daviscompanion-$(PKG_VERSION)
+PKG_BUILD_DIR:=$(BUILD_DIR)/daviscompanion-$(PKG_REF)
 
 PKG_MAINTAINER:=meteogargano <meteogargano@users.noreply.github.com>
 PKG_LICENSE:=MIT
